@@ -1,3 +1,10 @@
+from typing import Dict, Any
+from android.os import Build
+from org.telegram.messenger import ApplicationLoader
+from android_utils import log
+import time
+import os
+
 class MandreDevice:
     @staticmethod
     def get_device_info() -> Dict[str, Any]:
@@ -154,4 +161,5 @@ class MandreDevice:
             
             return f"{info.get('manufacturer', 'Unknown')} {info.get('model', 'Unknown')} (Android {info.get('android_version', 'Unknown')}, API {info.get('api_level', 'Unknown')})"
         except Exception as e:
+
             return f"Ошибка получения информации: {e}"
