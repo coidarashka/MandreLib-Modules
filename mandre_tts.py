@@ -4,17 +4,19 @@ from android_utils import run_on_ui_thread, log
 from ui.bulletin import BulletinHelper
 from java import dynamic_proxy
 from java.util import Locale
-import android.text.TextUtils as TextUtils
+import android.text.TextUtils as TextUtils # <--- ПРОВЕРЬ ЭТОТ ИМПОРТ
 
+# Внутренний класс состояния (должен быть внутри модуля)
 class _TTSState:
-    tts = None
-    init_ok = False
-    engine = None
-    deferred = False
+    def __init__(self):
+        self.tts = None
+        self.init_ok = False
+        self.engine = None
+        self.deferred = False
+
 _TTS_STATE = _TTSState()
 GOOGLE_TTS_PKG = "com.google.android.tts"
 
-# --- Новые внутренние функции для TTS ---
 def _internal_ensure_tts():
     ctx = ApplicationLoader.applicationContext
     if not ctx: return False
@@ -52,14 +54,12 @@ def _internal_shutdown_tts():
             _TTS_STATE.init_ok = False
             log("[MandreLib TTS] движок остановлен.")
     except Exception as e: log(f"[MandreLib TTS] shutdown error: {e}")
-# -----------------------------------
 
 class MandreTTS:
     @staticmethod
     def speak(text: str):
-        """Озвучивает текст, используя системный TTS."""
         try:
-            if not text or TextUtils.isEmpty(text): return
+            if not text: return # Простая проверка на пустоту
             if not (_TTS_STATE.tts and _TTS_STATE.init_ok):
                 if not _internal_ensure_tts():
                     log("[MandreLib TTS] Инициализация... Попробуйте через секунду.")
