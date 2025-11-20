@@ -1,3 +1,8 @@
+from typing import List, Any, Optional
+from mandre_lib import Mandre  # Чтобы был доступ к Mandre.sql_get_database
+from org.telegram.tgnet import TLRPC
+from android_utils import log
+
 class MandreMessages:
     @staticmethod
     def get_local(dialog_id: int, limit: int = 100) -> List[Any]:
@@ -32,4 +37,5 @@ class MandreMessages:
         finally:
             cursor.dispose() # Закрываем курсор
             
+
         return messages
