@@ -4,6 +4,7 @@ from org.telegram.messenger import ApplicationLoader
 from android_utils import log
 import time
 import os
+from java.util import Locale, TimeZone # <--- ДОБАВЛЕН ИМПОРТ
 
 class MandreDevice:
     @staticmethod
@@ -163,3 +164,4 @@ class MandreDevice:
         except Exception as e:
 
             return f"Ошибка получения информации: {e}"
+
