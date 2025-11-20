@@ -1,3 +1,17 @@
+from typing import Optional
+from android.os import Build
+from org.telegram.messenger import ApplicationLoader, R
+from org.telegram.ui.ActionBar import Theme
+# Импорты классов уведомлений (как в оригинальном MandreLib)
+from android.app import NotificationChannel, NotificationManager, PendingIntent
+from androidx.core.app import NotificationCompat, NotificationManagerCompat, Person
+from androidx.core.graphics.drawable import IconCompat
+from android.content import Context
+from android.graphics import BitmapFactory, Canvas, Paint, Rect, RectF, PorterDuff, PorterDuffXfermode, Bitmap
+import time
+import requests
+from android_utils import log
+
 class MandreNotification:
     @staticmethod
     def show_simple(title: str, text: str, channel_id: str = "mandrelib_notifications"):
@@ -123,4 +137,5 @@ class MandreNotification:
         paint.setXfermode(PorterDuffXfermode(PorterDuff.Mode.SRC_IN))
         canvas.drawBitmap(bitmap, rect, rect, paint)
         
+
         return output
