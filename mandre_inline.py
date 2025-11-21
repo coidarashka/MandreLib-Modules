@@ -1,82 +1,88 @@
-from typing import Dict, List, Any, Optional, Callable
-from dataclasses import dataclass
-import json
-import re
-from urllib.parse import urlencode, parse_qs, urlparse
-from android_utils import log
+from typing import Dict, Any, List, Optional, Callable, Union
 from org.telegram.tgnet import TLRPC
+from urllib.parse import urlencode
 from java.util import ArrayList
-from client_utils import get_send_messages_helper, get_messages_controller, get_last_fragment
+import json
+import base64
+import zlib
+import re
+from android_utils import log
+
+# --- Вспомогательные функции ---
+def _tl_object(cls, **kwargs):
+    obj = cls()
+    for k, v in kwargs.items():
+        setattr(obj, k, v)
+    return obj
 
 class MandreInline:
-    # Хранилище маркапов: dialog_id -> {msg_id: markup}
-    msg_markups: Dict[int, Dict[int, Any]] = {}
-    # Очередь на отправку: dialog_id -> [data]
-    need_markups: Dict[int, List[Dict[str, Any]]] = {}
+    # Хранилище обработчиков: { "plugin_id": { "method_name": callback } }
+    _handlers: Dict[str, Dict[str, Callable]] = {}
     
-    callbacks: Dict[str, Callable] = {} # plugin_id -> {method: func}
+    # Кэш маркупа для сообщений: { dialog_id: { msg_id: markup } }
+    _msg_markups: Dict[int, Dict[int, TLRPC.TL_replyInlineMarkup]] = {}
 
     @staticmethod
-    def CallbackData(plugin_id, method: str, **kwargs):
+    def CallbackData(plugin_id: str, method: str, **kwargs) -> str:
+        """Генерирует data для callback кнопки: mandre://plugin_id/method?args"""
         return f"mandre://{plugin_id}/{method}?{urlencode(kwargs)}"
 
     @staticmethod
-    def Button(text: str, callback_data: str = None, url: str = None):
+    def Button(text: str, url: str = None, callback_data: str = None, **kwargs) -> TLRPC.KeyboardButton:
+        """Создает объект кнопки"""
         if url:
-            btn = TLRPC.TL_keyboardButtonUrl()
-            btn.text = text
-            btn.url = url
-            return btn
-        elif callback_data:
-            btn = TLRPC.TL_keyboardButtonCallback()
-            btn.text = text
-            btn.data = callback_data.encode("utf-8")
-            btn.requires_password = False
-            return btn
-        return None
+            return _tl_object(TLRPC.TL_keyboardButtonUrl, text=text, url=url)
+        
+        if callback_data:
+            return _tl_object(
+                TLRPC.TL_keyboardButtonCallback, 
+                text=text, 
+                data=callback_data.encode("utf-8"),
+                requires_password=False
+            )
+            
+        # Упрощенный конструктор для плагинов MandreLib
+        if "method" in kwargs and "plugin_id" in kwargs:
+            cdata = MandreInline.CallbackData(kwargs["plugin_id"], kwargs["method"], **kwargs.get("args", {}))
+            return _tl_object(
+                TLRPC.TL_keyboardButtonCallback, 
+                text=text, 
+                data=cdata.encode("utf-8"),
+                requires_password=False
+            )
+
+        return _tl_object(TLRPC.TL_keyboardButtonCallback, text=text, data=b"noop")
 
     class Markup:
         def __init__(self):
             self._markup = TLRPC.TL_replyInlineMarkup()
-            self.rows = []
 
-        def add_row(self, *btns):
+        def add_row(self, *buttons):
             row = TLRPC.TL_keyboardButtonRow()
-            for btn in btns:
-                if btn: row.buttons.add(btn)
+            for btn in buttons:
+                if isinstance(btn, dict): # Поддержка словарей
+                    btn = MandreInline.Button(**btn)
+                row.buttons.add(btn)
             self._markup.rows.add(row)
             return self
-        
-        def get(self):
+            
+        @property
+        def tl(self):
             return self._markup
 
-    @dataclass
-    class CallbackParams:
-        message: Any # MessageObject
-        button: Any  # KeyboardButton
-        
-        def answer(self, text: str, alert: bool = False):
-            # Тут можно реализовать показ тоста или алерта
-            pass
-
-    # Декоратор для регистрации обработчика
-    @classmethod
-    def on_click(cls, method: str):
+    @staticmethod
+    def on_click(method: str):
+        """Декоратор для регистрации обработчика"""
         def decorator(func):
-            func.__is_inline_callback__ = True
-            func.__data__ = method
+            func.__is_inline_handler__ = True
+            func.__inline_method__ = method
             return func
         return decorator
 
-    # Метод для регистрации плагина (вызывается из MandreLib)
-    @classmethod
-    def register_plugin(cls, plugin):
-        # Ищем методы с декоратором @on_click
-        import inspect
-        for name, func in inspect.getmembers(plugin, predicate=inspect.ismethod):
-            if getattr(func, "__is_inline_callback__", False):
-                method_name = getattr(func, "__data__", name)
-                if plugin.id not in cls.callbacks:
-                    cls.callbacks[plugin.id] = {}
-                cls.callbacks[plugin.id][method_name] = func
-                log(f"[MandreInline] Registered callback: {plugin.id}/{method_name}")
+    @staticmethod
+    def register_handler(plugin_instance, method: str, callback: Callable):
+        pid = plugin_instance.id
+        if pid not in MandreInline._handlers:
+            MandreInline._handlers[pid] = {}
+        MandreInline._handlers[pid][method] = callback
+        log(f"[MandreInline] Registered handler: {pid}/{method}")
