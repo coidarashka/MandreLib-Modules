@@ -4,9 +4,9 @@ from android_utils import run_on_ui_thread, log
 from ui.bulletin import BulletinHelper
 from java import dynamic_proxy
 from java.util import Locale
-import android.text.TextUtils as TextUtils # <--- ПРОВЕРЬ ЭТОТ ИМПОРТ
+# --- ИСПРАВЛЕННЫЙ ИМПОРТ ---
+from android.text import TextUtils 
 
-# Внутренний класс состояния (должен быть внутри модуля)
 class _TTSState:
     def __init__(self):
         self.tts = None
@@ -59,7 +59,7 @@ class MandreTTS:
     @staticmethod
     def speak(text: str):
         try:
-            if not text: return # Простая проверка на пустоту
+            if not text: return
             if not (_TTS_STATE.tts and _TTS_STATE.init_ok):
                 if not _internal_ensure_tts():
                     log("[MandreLib TTS] Инициализация... Попробуйте через секунду.")
