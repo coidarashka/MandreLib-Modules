@@ -1,7 +1,8 @@
 from typing import Dict, Any, List, Optional, Callable, Union
-from org.telegram.tgnet import TLRPC
+# Правильный импорт TLRPC для работы с кнопками
+from org.telegram.tgnet import TLRPC 
 from urllib.parse import urlencode
-from java.util import ArrayList
+# Убрал лишний ArrayList, он не используется
 import json
 import base64
 import zlib
@@ -19,7 +20,7 @@ class MandreInline:
     # Хранилище обработчиков: { "plugin_id": { "method_name": callback } }
     _handlers: Dict[str, Dict[str, Callable]] = {}
     
-    # Кэш маркупа для сообщений: { dialog_id: { msg_id: markup } }
+    # Кэш маркупа для сообщений
     _msg_markups: Dict[int, Dict[int, TLRPC.TL_replyInlineMarkup]] = {}
 
     @staticmethod
