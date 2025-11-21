@@ -22,6 +22,7 @@ class MandreInline:
     
     # Кэш маркупа для сообщений
     _msg_markups: Dict[int, Dict[int, TLRPC.TL_replyInlineMarkup]] = {}
+    _pending_markups: Dict[int, TLRPC.TL_replyInlineMarkup] = {}
 
     @staticmethod
     def CallbackData(plugin_id: str, method: str, **kwargs) -> str:
@@ -81,9 +82,15 @@ class MandreInline:
         return decorator
 
     @staticmethod
-    def register_handler(plugin_instance, method: str, callback: Callable):
-        pid = plugin_instance.id
-        if pid not in MandreInline._handlers:
-            MandreInline._handlers[pid] = {}
-        MandreInline._handlers[pid][method] = callback
-        log(f"[MandreInline] Registered handler: {pid}/{method}")
+    def register_markup(dialog_id, msg_id, markup):
+        if dialog_id not in MandreInline._msg_markups:
+            MandreInline._msg_markups[dialog_id] = {}
+        MandreInline._msg_markups[dialog_id][msg_id] = markup
+
+    @staticmethod
+    def get_markup(dialog_id, msg_id):
+        return MandreInline._msg_markups.get(dialog_id, {}).get(msg_id)
+        
+    @staticmethod
+    def register_pending(random_id, markup):
+        MandreInline._pending_markups[random_id] = markup
