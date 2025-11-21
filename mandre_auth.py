@@ -12,7 +12,7 @@ _AUTH_REQUEST_CODE = 1337
 _auth_hook = None
 _auth_success_cb = None
 _auth_failure_cb = None
-_hooked_plugin = None # Храним ссылку на плагин, который поставил хук
+_hooked_plugin = None
 
 class _AuthActivityResultHook(MethodHook):
     def before_hooked_method(self, param):
@@ -27,9 +27,9 @@ class _AuthActivityResultHook(MethodHook):
                     if callable(_auth_failure_cb): run_on_ui_thread(_auth_failure_cb)
         except Exception: log(f"[MandreLib Auth] Ошибка в хуке результата: {traceback.format_exc()}")
         finally:
-            # Снимаем хук, используя сохраненный плагин
             if _auth_hook and _hooked_plugin: 
-                _hooked_plugin.unhook_method(_auth_hook)
+                try: _hooked_plugin.unhook_method(_auth_hook)
+                except: pass
                 _auth_hook = None
                 _hooked_plugin = None
             _auth_success_cb = None; _auth_failure_cb = None
@@ -38,7 +38,7 @@ class MandreAuth:
     @staticmethod
     def request(plugin_instance, on_success: Callable, on_failure: Callable, title: str = "Подтверждение", description: str = "Доступ"):
         """
-        plugin_instance: Ссылка на self плагина, который вызывает auth (нужно для хука).
+        plugin_instance: Ссылка на self плагина (ОБЯЗАТЕЛЬНО)
         """
         global _auth_hook, _auth_success_cb, _auth_failure_cb, _hooked_plugin
         
@@ -57,14 +57,17 @@ class MandreAuth:
                 _auth_success_cb, _auth_failure_cb = on_success, on_failure
                 intent = keyguard.createConfirmDeviceCredentialIntent(title, description)
                 
-                # Снимаем старый хук если был
-                if _auth_hook and _hooked_plugin: _hooked_plugin.unhook_method(_auth_hook)
+                # Очистка старого хука
+                if _auth_hook and _hooked_plugin: 
+                    try: _hooked_plugin.unhook_method(_auth_hook)
+                    except: pass
                 
                 method = activity.getClass().getDeclaredMethod("onActivityResult", JInteger.TYPE, JInteger.TYPE, Intent)
                 
-                # Используем переданный плагин для хука
+                # --- ВОТ ТУТ БЫЛА ОШИБКА. ТЕПЕРЬ ИСПОЛЬЗУЕМ plugin_instance ---
                 _auth_hook = plugin_instance.hook_method(method, _AuthActivityResultHook())
                 _hooked_plugin = plugin_instance
+                # --------------------------------------------------------------
                 
                 activity.startActivityForResult(intent, _AUTH_REQUEST_CODE)
             except Exception:
