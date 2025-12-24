@@ -5,29 +5,24 @@ import android.graphics.*;
 import android.graphics.drawable.Drawable;
 import android.view.*;
 import android.view.animation.OvershootInterpolator;
+import android.util.Log;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import java.lang.reflect.Field;
 
 public class Main {
-    // Метод для вывода логов в консоль плагинов
-    private void xLog(String m) {
-        try { XposedBridge.log("[LiquidGlass] " + m); } catch(Throwable ignored) {}
-    }
+    private static final String TAG = "LiquidGlass";
 
-    // Входная точка для Loader
     public void start() {
-        xLog("Plugin started. Targeting FAB...");
+        Log.i(TAG, "DEX Loaded successfully");
         try {
-            // Поля контейнеров кнопок из Telegram и ExteraGram
-            String[] targetFields = {"floatingButtonContainer", "floatingButton2Container", "floatingButton"};
+            // Список полей FAB из ExteraGram
+            String[] fields = {"floatingButtonContainer", "floatingButton2Container", "floatingButton"};
             
-            // Хукаем главную страницу (Dialogs) и экран чата (Chat)
-            hookActivity("org.telegram.ui.DialogsActivity", targetFields);
-            hookActivity("org.telegram.ui.ChatActivity", targetFields);
-            
+            hookActivity("org.telegram.ui.DialogsActivity", fields);
+            hookActivity("org.telegram.ui.ChatActivity", fields);
         } catch (Exception e) {
-            xLog("Start Error: " + e.toString());
+            Log.e(TAG, "Start error: " + e.getMessage());
         }
     }
 
@@ -40,7 +35,6 @@ public class Main {
                 final View root = (View) p.getResult();
                 if (root == null) return;
 
-                // Небольшая задержка, чтобы UI успел прогрузиться
                 root.postDelayed(() -> {
                     for (String fName : fields) {
                         try {
@@ -48,33 +42,27 @@ public class Main {
                             f.setAccessible(true);
                             View fab = (View) f.get(fragment);
                             if (fab != null) {
-                                xLog("Found FAB field: " + fName);
-                                applyLiquidGlass(fab);
+                                Log.i(TAG, "Applying effect to: " + fName);
+                                applyGlass(fab);
                             }
                         } catch (Exception ignored) {}
                     }
-                }, 800);
+                }, 1000);
             }
         });
     }
 
-    private void applyLiquidGlass(View v) {
-        // 1. Устанавливаем матовое стекло
-        v.setBackground(new GlassEffect());
-        
-        // 2. Настоящий Backdrop Blur (Android 12+)
+    private void applyGlass(View v) {
+        v.setBackground(new AppleGlass());
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             try {
                 v.setRenderEffect(RenderEffect.createBlurEffect(25f, 25f, Shader.TileMode.CLAMP));
             } catch (Exception ignored) {}
         }
-
-        // 3. Liquid Touch Animation (как на iOS)
         v.setOnTouchListener((v1, ev) -> {
-            int action = ev.getAction();
-            if (action == MotionEvent.ACTION_DOWN) {
-                v1.animate().scaleX(0.88f).scaleY(0.88f).alpha(0.7f).setDuration(120).start();
-            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            if (ev.getAction() == MotionEvent.ACTION_DOWN) {
+                v1.animate().scaleX(0.88f).scaleY(0.88f).alpha(0.7f).setDuration(150).start();
+            } else if (ev.getAction() == MotionEvent.ACTION_UP || ev.getAction() == MotionEvent.ACTION_CANCEL) {
                 v1.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(450)
                     .setInterpolator(new OvershootInterpolator(3.0f)).start();
             }
@@ -82,31 +70,22 @@ public class Main {
         });
     }
 
-    // Кастомная отрисовка стекла
-    static class GlassEffect extends Drawable {
-        private final Paint glassPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint specPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        public GlassEffect() {
-            // Основной слой: 50% белый (Frosted Glass)
-            glassPaint.setColor(0x82FFFFFF); 
-            
-            // Тонкая яркая обводка: 70% белый (Specular Edge)
-            specPaint.setStyle(Paint.Style.STROKE);
-            specPaint.setStrokeWidth(3f);
-            specPaint.setColor(0xB4FFFFFF);
+    static class AppleGlass extends Drawable {
+        private final Paint g = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint b = new Paint(Paint.ANTI_ALIAS_FLAG);
+        public AppleGlass() {
+            g.setColor(0x82FFFFFF); // 50% белый
+            b.setStyle(Paint.Style.STROKE);
+            b.setStrokeWidth(3f);
+            b.setColor(0xB4FFFFFF); // Блик
         }
-
         @Override
         public void draw(Canvas c) {
-            RectF rf = new RectF(getBounds());
-            float radius = Math.min(rf.width(), rf.height()) / 2f;
-            
-            // Рисуем тело и блик
-            c.drawRoundRect(rf, radius, radius, glassPaint);
-            c.drawRoundRect(rf, radius, radius, specPaint);
+            RectF r = new RectF(getBounds());
+            float rad = Math.min(r.width(), r.height()) / 2f;
+            c.drawRoundRect(r, rad, rad, g);
+            c.drawRoundRect(r, rad, rad, b);
         }
-
         @Override public void setAlpha(int a) {}
         @Override public void setColorFilter(ColorFilter cf) {}
         @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
