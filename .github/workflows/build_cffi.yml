@@ -1,4 +1,4 @@
-name: Build CFFI 2.0 (Patchelf Replace)
+name: Build Ultimate CFFI 2.0 (Android Bionic Patch)
 
 on:
   workflow_dispatch:
@@ -15,8 +15,8 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
-          pip install wheel setuptools
+          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf binutils-aarch64-linux-gnu
+          pip install wheel setuptools pycparser
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -24,24 +24,17 @@ jobs:
           unzip -q android-ndk-r26b-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
 
-      - name: Build LibFFI
+      - name: Build LibFFI (Static)
         run: |
           NDK=$ANDROID_NDK_HOME
-          API=30
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
-          export AR=$TOOLCHAIN/bin/llvm-ar
-          export LD=$TOOLCHAIN/bin/ld
-          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
-          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
           
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           mkdir -p $WORKDIR $FFI_INSTALL
           
-          echo ">>> Building libffi..."
           cd $WORKDIR
           wget https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
           tar xzf libffi-3.4.6.tar.gz
@@ -49,21 +42,20 @@ jobs:
           ./configure --host=${TARGET_HOST} --prefix=${FFI_INSTALL} --disable-shared --enable-static
           make -j$(nproc)
           make install
+          echo "FFI_INSTALL=$FFI_INSTALL" >> $GITHUB_ENV
 
       - name: Build and Patch CFFI Wheel
         run: |
           NDK=$ANDROID_NDK_HOME
-          API=30
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
           export LDSHARED="$CC -shared"
           
           WORKDIR=$PWD/build_work
-          FFI_INSTALL=$WORKDIR/libffi_install
+          FFI_INSTALL=${{ env.FFI_INSTALL }}
           
-          # Создаем пустую libpython3.11.so для линковки
+          # Создаем dummy-библиотеку питона для корректной линковки
           mkdir -p $WORKDIR/dummy_lib
           $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
           
@@ -74,10 +66,9 @@ jobs:
           
           echo ">>> Building CFFI..."
           cd $WORKDIR
-          # Используем pip wheel, так как он лучше всего собирает пакет
           pip wheel cffi==2.0.0 --no-deps -w dist
           
-          echo ">>> Magic Unpack and Patch..."
+          echo ">>> Patching for Android (Bionic)..."
           cd dist
           wheel unpack cffi-*.whl -d unpacked
           cd unpacked/cffi-*
@@ -85,26 +76,55 @@ jobs:
           SO_FILE=$(find . -name "_cffi_backend*.so")
           echo "Found SO file: $SO_FILE"
           
-          # Проверяем зависимости до
-          patchelf --print-needed $SO_FILE
+          # Заменяем Linux-библиотеки на системную libc Android
+          # patchelf --replace-needed СТАРЫЙ_ФАЙЛ НОВЫЙ_ФАЙЛ
+          patchelf --replace-needed libpthread.so.0 libc.so $SO_FILE || true
+          patchelf --replace-needed libc.so.6 libc.so $SO_FILE || true
+          patchelf --replace-needed libm.so.6 libc.so $SO_FILE || true
+          patchelf --replace-needed libdl.so.2 libc.so $SO_FILE || true
           
+          # Принудительно вшиваем зависимость от ядра Питона
+          patchelf --add-needed libpython3.11.so $SO_FILE
+          
+          # Переименовываем в чистое имя (чтобы ReMandre нашел его)
           mv $SO_FILE _cffi_backend.so
           
-          # === ГЛАВНЫЙ ФИКС ===
-          # Заменяем libpthread.so.0 на libc.so (так как в Android pthread внутри libc)
-          patchelf --replace-needed libpthread.so.0 libc.so _cffi_backend.so || true
+          # =========================================================
+          # ТЕСТЫ И ПРОВЕРКИ (SANITY CHECK)
+          # =========================================================
+          echo ">>> Starting Sanity Checks..."
           
-          # Добавляем зависимость от питона, если ее нет
-          patchelf --add-needed libpython3.11.so _cffi_backend.so
+          # 1. Проверка архитектуры
+          FILE_INFO=$(file _cffi_backend.so)
+          echo "Binary info: $FILE_INFO"
+          if [[ ! "$FILE_INFO" == *"ARM aarch64"* ]]; then
+            echo "FAILED: Wrong architecture! Need aarch64."
+            exit 1
+          fi
           
-          # Проверяем зависимости после
-          patchelf --print-needed _cffi_backend.so
+          # 2. Проверка зависимостей
+          NEEDS=$(patchelf --print-needed _cffi_backend.so)
+          echo "Final dependencies:"
+          echo "$NEEDS"
           
+          # Ищем запрещенные линуксовые строки
+          if echo "$NEEDS" | grep -E "libc.so.6|libpthread|libm.so.6"; then
+            echo "FAILED: Binary still contains Linux-specific dependencies!"
+            exit 1
+          fi
+          
+          # Проверяем наличие libpython
+          if ! echo "$NEEDS" | grep "libpython3.11.so"; then
+            echo "FAILED: Binary is not linked to libpython3.11.so!"
+            exit 1
+          fi
+          
+          echo ">>> Checks passed successfully!"
+          
+          # Запаковываем обратно
           cd ../..
-          rm *.whl
-          
           wheel pack unpacked/cffi-* -d .
-          mv cffi-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
+          mv cffi-2.0.0-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
           
           mkdir -p $GITHUB_WORKSPACE/output
           cp *.whl $GITHUB_WORKSPACE/output/
