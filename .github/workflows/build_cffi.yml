@@ -1,4 +1,4 @@
-name: Build Ultimate CFFI 2.0 (Patchelf Force)
+name: Build Ultimate CFFI 2.0 (No Patchelf, Pure Compile)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
+          sudo apt-get install -y build-essential automake libtool wget unzip zip
           pip install wheel setuptools
 
       - name: Download & Setup Android NDK (r26b)
@@ -50,20 +50,45 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Build and Patch CFFI Wheel
+      - name: Build CFFI Wheel
         run: |
           NDK=$ANDROID_NDK_HOME
           API=30
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
           
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           
+          # =========================================================
+          # СОЗДАЕМ ПЕРЕХВАТЧИК КОМПИЛЯТОРА
+          # =========================================================
+          mkdir -p $WORKDIR/bin
+          export REAL_CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          
+          cat << 'EOF' > $WORKDIR/bin/clang-wrapper
+          #!/bin/bash
+          ARGS=()
+          for arg in "$@"; do
+              case "$arg" in
+                  -lpthread|-lrt|-lutil|-lc|-ldl|-lm)
+                      # Игнорируем линуксовые библиотеки при линковке
+                      ;;
+                  *)
+                      ARGS+=("$arg")
+                      ;;
+              esac
+          done
+          exec "$REAL_CC" "${ARGS[@]}"
+          EOF
+          chmod +x $WORKDIR/bin/clang-wrapper
+          
+          export CC=$WORKDIR/bin/clang-wrapper
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          
+          # Создаем пустую библиотеку питона, чтобы прописать зависимость
           mkdir -p $WORKDIR/dummy_lib
-          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          $REAL_CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
@@ -73,15 +98,14 @@ jobs:
           echo ">>> Building CFFI from sources..."
           cd $WORKDIR
           
-          # Качаем исходники напрямую, обходя изоляцию PIP!
           wget https://files.pythonhosted.org/packages/source/c/cffi/cffi-2.0.0.tar.gz
           tar xzf cffi-2.0.0.tar.gz
           cd cffi-2.0.0
           
-          # Собираем колесо
+          # Собираем колесо напрямую (без PEP 517 изоляции pip)
           python3 setup.py bdist_wheel
           
-          echo ">>> Magic Unpack and Patch..."
+          echo ">>> Magic Unpack and Rename..."
           cd dist
           wheel unpack cffi-*.whl -d unpacked
           cd unpacked/cffi-*
@@ -89,25 +113,13 @@ jobs:
           SO_FILE=$(find . -name "_cffi_backend*.so")
           echo "Found SO file: $SO_FILE"
           
-          # Проверяем архитектуру для логов
-          file $SO_FILE
-          
+          # Переименовываем
           mv $SO_FILE _cffi_backend.so
-          
-          echo "Dependencies BEFORE patch:"
-          patchelf --print-needed _cffi_backend.so
-          
-          # ЖЕСТКОЕ УДАЛЕНИЕ ЛИНУКСОВЫХ ЗАВИСИМОСТЕЙ ИЗ БИНАРНИКА!
-          patchelf --remove-needed libpthread.so.0 _cffi_backend.so || true
-          patchelf --remove-needed libc.so.6 _cffi_backend.so || true
-          
-          echo "Dependencies AFTER patch:"
-          patchelf --print-needed _cffi_backend.so
           
           cd ../..
           rm *.whl
           
-          # Запаковываем (хэши пересчитаются автоматически)
+          # Запаковываем обратно (хэши пересчитаются автоматически)
           wheel pack unpacked/cffi-* -d .
           
           # Меняем имя на Android формат
