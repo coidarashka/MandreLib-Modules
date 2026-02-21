@@ -52,14 +52,19 @@ jobs:
           FFI_INSTALL=${{ env.FFI_INSTALL }}
           
           # =========================================================
-          # ОБМАНКА №1: Создаем dummy libpython с нужными символами
+          # ОБМАНКА: Создаем dummy libpython БЕЗ ВКЛЮЧЕНИЯ HEADER-ФАЙЛОВ
+          # Это предотвращает ошибку redefinition of 'stderr'
           # =========================================================
           mkdir -p $WORKDIR/dummy_lib
           cat << 'EOF' > $WORKDIR/dummy_lib/dummy.c
-          #include <stdio.h>
-          void* stderr; void* stdout; void* stdin;
-          void PyExc_ImportError() {}
-          void PyExc_RuntimeError() {}
+          // Пустые указатели для линковщика
+          void* stdin = 0;
+          void* stdout = 0;
+          void* stderr = 0;
+          void PyExc_ImportError(void) {}
+          void PyExc_RuntimeError(void) {}
+          void PyExc_TypeError(void) {}
+          void PyExc_ValueError(void) {}
           EOF
           $CC -shared $WORKDIR/dummy_lib/dummy.c -o $WORKDIR/dummy_lib/libpython3.11.so
           
@@ -75,32 +80,38 @@ jobs:
           
           echo ">>> Patching..."
           cd dist
-          wheel unpack cffi-*.whl -d unpacked
-          cd unpacked/cffi-*
+          WHEEL_FILE=$(ls cffi-*.whl)
+          unzip -q $WHEEL_FILE -d unpacked
+          cd unpacked
           
           SO_FILE=$(find . -name "_cffi_backend*.so")
           
-          # Убираем зависимости от Linux
+          # 1. Заменяем зависимости Linux на Android
           patchelf --replace-needed libpthread.so.0 libc.so $SO_FILE || true
           patchelf --replace-needed libc.so.6 libc.so $SO_FILE || true
           
-          # Вшиваем зависимость от Питона (откуда он возьмет stderr)
+          # 2. Вшиваем зависимость от Питона
           patchelf --add-needed libpython3.11.so $SO_FILE
           
-          # КРИТИЧНО: Удаляем секцию symbol versioning (она ломает Android)
-          # Это удаляет те самые verneed[0], на которые ругался Android
+          # 3. УДАЛЯЕМ СЕКЦИЮ ВЕРСИЙ СИМВОЛОВ (Critical for Android 10+)
+          # Это удаляет те самые verneed, которые ищут libpthread.so.0
           patchelf --remove-section .gnu.version_r $SO_FILE || true
           
-          mv $SO_FILE _cffi_backend.so
+          # 4. Переименовываем в чистое имя
+          CLEAN_SO="_cffi_backend.so"
+          mv $SO_FILE $CLEAN_SO
           
-          # Тест
-          echo "Final Dependencies:"
-          patchelf --print-needed _cffi_backend.so
+          # Проверка результата
+          echo "Final SO architecture and dependencies:"
+          file $CLEAN_SO
+          patchelf --print-needed $CLEAN_SO
           
-          # Запаковываем
+          # 5. Запаковываем обратно
+          zip -q -r ../../fixed_cffi.whl *
           cd ../..
-          wheel pack unpacked/cffi-* -d .
-          mv cffi-2.0.0-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
+          
+          # 6. Финальное имя файла
+          mv fixed_cffi.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
           
           mkdir -p $GITHUB_WORKSPACE/output
           cp *.whl $GITHUB_WORKSPACE/output/
