@@ -1,4 +1,4 @@
-name: Build Ultimate CFFI 2.0 (No Patchelf, Pure Compile)
+name: Build CFFI 2.0 (Patchelf Replace)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip
+          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
           pip install wheel setuptools
 
       - name: Download & Setup Android NDK (r26b)
@@ -50,62 +50,34 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Build CFFI Wheel
+      - name: Build and Patch CFFI Wheel
         run: |
           NDK=$ANDROID_NDK_HOME
           API=30
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export LDSHARED="$CC -shared"
           
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           
-          # =========================================================
-          # СОЗДАЕМ ПЕРЕХВАТЧИК КОМПИЛЯТОРА
-          # =========================================================
-          mkdir -p $WORKDIR/bin
-          export REAL_CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
-          
-          cat << 'EOF' > $WORKDIR/bin/clang-wrapper
-          #!/bin/bash
-          ARGS=()
-          for arg in "$@"; do
-              case "$arg" in
-                  -lpthread|-lrt|-lutil|-lc|-ldl|-lm)
-                      # Игнорируем линуксовые библиотеки при линковке
-                      ;;
-                  *)
-                      ARGS+=("$arg")
-                      ;;
-              esac
-          done
-          exec "$REAL_CC" "${ARGS[@]}"
-          EOF
-          chmod +x $WORKDIR/bin/clang-wrapper
-          
-          export CC=$WORKDIR/bin/clang-wrapper
-          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
-          
-          # Создаем пустую библиотеку питона, чтобы прописать зависимость
+          # Создаем пустую libpython3.11.so для линковки
           mkdir -p $WORKDIR/dummy_lib
-          $REAL_CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
-          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11"
-          export LDSHARED="$CC -shared $LDFLAGS"
+          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
+          export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
-          echo ">>> Building CFFI from sources..."
+          echo ">>> Building CFFI..."
           cd $WORKDIR
+          # Используем pip wheel, так как он лучше всего собирает пакет
+          pip wheel cffi==2.0.0 --no-deps -w dist
           
-          wget https://files.pythonhosted.org/packages/source/c/cffi/cffi-2.0.0.tar.gz
-          tar xzf cffi-2.0.0.tar.gz
-          cd cffi-2.0.0
-          
-          # Собираем колесо напрямую (без PEP 517 изоляции pip)
-          python3 setup.py bdist_wheel
-          
-          echo ">>> Magic Unpack and Rename..."
+          echo ">>> Magic Unpack and Patch..."
           cd dist
           wheel unpack cffi-*.whl -d unpacked
           cd unpacked/cffi-*
@@ -113,16 +85,25 @@ jobs:
           SO_FILE=$(find . -name "_cffi_backend*.so")
           echo "Found SO file: $SO_FILE"
           
-          # Переименовываем
+          # Проверяем зависимости до
+          patchelf --print-needed $SO_FILE
+          
           mv $SO_FILE _cffi_backend.so
+          
+          # === ГЛАВНЫЙ ФИКС ===
+          # Заменяем libpthread.so.0 на libc.so (так как в Android pthread внутри libc)
+          patchelf --replace-needed libpthread.so.0 libc.so _cffi_backend.so || true
+          
+          # Добавляем зависимость от питона, если ее нет
+          patchelf --add-needed libpython3.11.so _cffi_backend.so
+          
+          # Проверяем зависимости после
+          patchelf --print-needed _cffi_backend.so
           
           cd ../..
           rm *.whl
           
-          # Запаковываем обратно (хэши пересчитаются автоматически)
           wheel pack unpacked/cffi-* -d .
-          
-          # Меняем имя на Android формат
           mv cffi-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
           
           mkdir -p $GITHUB_WORKSPACE/output
