@@ -18,7 +18,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip
+          sudo apt-get install -y build-essential automake libtool wget unzip pkg-config
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -48,6 +48,9 @@ jobs:
           # КРИТИЧЕСКИ ВАЖНЫЙ ФИКС ЛИНКОВЩИКА ДЛЯ PYTHON:
           export LDSHARED="$CC -shared"
           
+          # Указываем Python, что мы кросс-компилируем:
+          export _PYTHON_HOST_PLATFORM=linux-aarch64
+          
           # Папки
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
@@ -71,15 +74,42 @@ jobs:
           # 2. Сборка CFFI
           echo ">>> Building CFFI..."
           cd $WORKDIR
+          # Ставим зависимости сборки ВРУЧНУЮ
           pip install --upgrade pip setuptools wheel pycparser
           
-          # Собираем wheel (без использования системных бинарников)
-          pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
+          # Собираем wheel С ОТКЛЮЧЕННОЙ ИЗОЛЯЦИЕЙ (--no-build-isolation), 
+          # чтобы pip не сбросил наши переменные окружения!
+          pip wheel cffi==${CFFI_VER} --no-build-isolation --no-binary cffi --no-deps -w ./wheels -v
           
-          # 3. Переименование под стандарты Chaquopy
-          echo ">>> Renaming..."
+          # 3. Перепаковка и переименование
+          echo ">>> Repacking and Renaming..."
           cd ./wheels
-          find . -name "cffi-*.whl" -exec mv {} cffi-${CFFI_VER}-${CHAQUO_TAG}.whl \;
+          
+          # Находим собранный wheel
+          WHEEL_FILE=$(ls cffi-*.whl | head -n 1)
+          
+          # Распаковываем
+          unzip -q $WHEEL_FILE -d tmp_wheel
+          
+          # Ищем библиотеку (она будет иметь длинный суффикс)
+          SO_FILE=$(find tmp_wheel -name "_cffi_backend*.so" | head -n 1)
+          if [ -n "$SO_FILE" ]; then
+            echo "Renaming $SO_FILE to _cffi_backend.so for Chaquopy compatibility..."
+            mv $SO_FILE $(dirname $SO_FILE)/_cffi_backend.so
+          else
+            echo "::error::Could not find ANY _cffi_backend.so inside the wheel!"
+            exit 1
+          fi
+          
+          # Запаковываем обратно
+          rm $WHEEL_FILE
+          cd tmp_wheel
+          zip -qr ../$WHEEL_FILE .
+          cd ..
+          rm -rf tmp_wheel
+          
+          # Переименовываем под Android стандарты
+          mv $WHEEL_FILE cffi-${CFFI_VER}-${CHAQUO_TAG}.whl
           ls -la
           
           # Выносим результат в корень
@@ -91,14 +121,12 @@ jobs:
           echo ">>> Starting sanity checks on the built binary..."
           cd $GITHUB_WORKSPACE/output
           
-          # Находим наш файл wheel
           WHEEL_FILE=$(ls cffi-*.whl | head -n 1)
           echo "Target wheel: $WHEEL_FILE"
           
-          # Распаковываем во временную папку
           unzip -q $WHEEL_FILE -d wheel_content
           
-          # Ищем скомпилированный модуль
+          # Мы переименовали файл на предыдущем шаге, так что ищем точное короткое имя:
           SO_FILE=$(find wheel_content -name "_cffi_backend.so" | head -n 1)
           if [ -z "$SO_FILE" ]; then
             echo "::error::_cffi_backend.so NOT FOUND in the wheel!"
