@@ -1,4 +1,4 @@
-name: Build Ultimate CFFI 2.0 (Patched)
+name: Build Ultimate CFFI 2.0 (Clean Compiler)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
+          sudo apt-get install -y build-essential automake libtool wget unzip zip
           pip install wheel setuptools
 
       - name: Download & Setup Android NDK (r26b)
@@ -56,21 +56,44 @@ jobs:
           API=30
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
-          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
-          export LDSHARED="$CC -shared"
           
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           
-          export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
-          export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
+          # =========================================================
+          # МЕГА-ХАК: СОЗДАЕМ ПЕРЕХВАТЧИК КОМПИЛЯТОРА
+          # =========================================================
+          mkdir -p $WORKDIR/bin
+          export REAL_CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
           
+          cat << 'EOF' > $WORKDIR/bin/clang-wrapper
+          #!/bin/bash
+          ARGS=()
+          for arg in "$@"; do
+              case "$arg" in
+                  -lpthread|-lrt|-lutil|-lc|-ldl|-lm)
+                      # Бьем Python по рукам! Вырезаем Linux-библиотеки.
+                      ;;
+                  *)
+                      ARGS+=("$arg")
+                      ;;
+              esac
+          done
+          exec "$REAL_CC" "${ARGS[@]}"
+          EOF
+          chmod +x $WORKDIR/bin/clang-wrapper
+          
+          export CC=$WORKDIR/bin/clang-wrapper
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export LDSHARED="$CC -shared"
+          
+          # Создаем пустую библиотеку питона, чтобы прописать зависимость
           mkdir -p $WORKDIR/dummy_lib
           $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
           
+          export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
+          export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
           export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
-          export LDSHARED="$CC -shared $LDFLAGS"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
           echo ">>> Building CFFI..."
@@ -85,26 +108,16 @@ jobs:
           SO_FILE=$(find . -name "_cffi_backend*.so")
           echo "Found SO file: $SO_FILE"
           
+          # Делаем чистое имя для Android
           mv $SO_FILE _cffi_backend.so
-          
-          # 1. Вшиваем Питон
-          patchelf --add-needed libpython3.11.so _cffi_backend.so
-          
-          # 2. ВЫРЕЗАЕМ ЛИНУКСОВЫЙ МУСОР, КОТОРЫЙ ЛОМАЕТ ANDROID!
-          patchelf --remove-needed libpthread.so.0 _cffi_backend.so || true
-          patchelf --remove-needed libc.so.6 _cffi_backend.so || true
-          patchelf --remove-needed libdl.so.2 _cffi_backend.so || true
-          patchelf --remove-needed libm.so.6 _cffi_backend.so || true
-          patchelf --remove-needed libutil.so.1 _cffi_backend.so || true
-          patchelf --remove-needed librt.so.1 _cffi_backend.so || true
           
           cd ../..
           rm *.whl
           
-          # Запаковываем обратно
+          # Запаковываем (хэши пересчитаются автоматически)
           wheel pack unpacked/cffi-* -d .
           
-          # Меняем имя колеса на Android формат
+          # Меняем имя на Android формат
           mv cffi-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
           
           mkdir -p $GITHUB_WORKSPACE/output
