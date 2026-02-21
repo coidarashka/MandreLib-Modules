@@ -1,4 +1,4 @@
-name: Build CFFI 2.0 for Android (Linked)
+name: Build Ultimate CFFI 2.0 (Patched)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,9 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip file
+          # patchelf - утилита для аппаратной модификации .so файлов!
+          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
+          pip install wheel setuptools
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -23,15 +25,11 @@ jobs:
           unzip -q android-ndk-r26b-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
 
-      - name: Build LibFFI & CFFI Wheel
+      - name: Build LibFFI
         run: |
           NDK=$ANDROID_NDK_HOME
           API=30
           TARGET_HOST=aarch64-linux-android
-          LIBFFI_VER=3.4.6
-          CFFI_VER=2.0.0
-          CHAQUO_TAG=cp311-cp311-android_30_arm64_v8a
-          
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
@@ -44,47 +42,60 @@ jobs:
           FFI_INSTALL=$WORKDIR/libffi_install
           mkdir -p $WORKDIR $FFI_INSTALL
           
-          # 1. Сборка LIBFFI
           echo ">>> Building libffi..."
           cd $WORKDIR
-          wget https://github.com/libffi/libffi/releases/download/v${LIBFFI_VER}/libffi-${LIBFFI_VER}.tar.gz
-          tar xzf libffi-${LIBFFI_VER}.tar.gz
-          cd libffi-${LIBFFI_VER}
+          wget https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
+          tar xzf libffi-3.4.6.tar.gz
+          cd libffi-3.4.6
           ./configure --host=${TARGET_HOST} --prefix=${FFI_INSTALL} --disable-shared --enable-static
           make -j$(nproc)
           make install
+
+      - name: Build and Patch CFFI Wheel
+        run: |
+          NDK=$ANDROID_NDK_HOME
+          API=30
+          TARGET_HOST=aarch64-linux-android
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export LDSHARED="$CC -shared"
           
-          # 2. МЕГА ХАК ДЛЯ ANDROID: Создаем пустую libpython3.11.so для линковки
-          # Это заставит _cffi_backend.so прописать зависимость и искать символы Питона при загрузке!
-          mkdir -p $WORKDIR/dummy_lib
-          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          WORKDIR=$PWD/build_work
+          FFI_INSTALL=$WORKDIR/libffi_install
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
-          # -Wl,-allow-shlib-undefined игнорирует пустоту нашей dummy библиотеки
-          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
-          export LDSHARED="$CC -shared $LDFLAGS"
+          export LDFLAGS="-L${FFI_INSTALL}/lib"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
-          # 3. Сборка CFFI
           echo ">>> Building CFFI..."
           cd $WORKDIR
-          pip install --upgrade pip setuptools wheel pycparser
-          pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
+          pip wheel cffi==2.0.0 --no-deps -w dist
           
-          # 4. Чистка имени Wheel и .so файла
-          echo ">>> Fixing Wheel..."
-          cd ./wheels
-          WHEEL_FILE=$(ls cffi-*.whl)
-          unzip -q $WHEEL_FILE -d wheel_tmp
-          rm $WHEEL_FILE
-          cd wheel_tmp
+          echo ">>> Magic Unpack and Patch..."
+          cd dist
+          wheel unpack cffi-*.whl -d unpacked
+          cd unpacked/cffi-*
           
+          # Находим .so файл
           SO_FILE=$(find . -name "_cffi_backend*.so")
+          echo "Found SO file: $SO_FILE"
+          
+          # Переименовываем в чистое имя
           mv $SO_FILE _cffi_backend.so
           
-          zip -q -r ../cffi-${CFFI_VER}-${CHAQUO_TAG}.whl *
-          cd ..
+          # === САМОЕ ГЛАВНОЕ: ВШИВАЕМ ПИТОН В БИНАРНИК ===
+          patchelf --add-needed libpython3.11.so _cffi_backend.so
+          
+          cd ../..
+          rm *.whl
+          
+          # Запаковываем обратно (хэши пересчитаются автоматически!)
+          wheel pack unpacked/cffi-* -d .
+          
+          # Меняем имя колеса на Android формат
+          mv cffi-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
           
           mkdir -p $GITHUB_WORKSPACE/output
           cp *.whl $GITHUB_WORKSPACE/output/
