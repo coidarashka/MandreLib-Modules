@@ -1,0 +1,55 @@
+name: Build Test Native Library (.so)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write C Source Code
+        run: |
+          cat << 'EOF' > test_lib.c
+          #include <stdlib.h>
+          #include <stdio.h>
+          
+          // Возвращаем число
+          int get_magic_number() { 
+              return 777; 
+          }
+          
+          // Возвращаем отформатированную строку
+          char* get_greeting(const char* name) {
+              char* buf = malloc(256);
+              if (name) {
+                  snprintf(buf, 256, "Привет, %s! C-код работает как часы.", name);
+              } else {
+                  snprintf(buf, 256, "Привет! Имя не передано.");
+              }
+              return buf;
+          }
+          
+          // Очистка памяти (чтобы не было утечек в Python)
+          void free_string(char* ptr) { 
+              if (ptr) free(ptr); 
+          }
+          EOF
+
+      - name: Download & Setup Android NDK (r26b)
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+
+      - name: Compile to Android ARM64
+        run: |
+          CC="$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android30-clang"
+          $CC -shared -fPIC test_lib.c -o libmandretest.so
+          
+          echo ">>> DONE. Check architecture:"
+          file libmandretest.so
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmandretest
+          path: libmandretest.so
