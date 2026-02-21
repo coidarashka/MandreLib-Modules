@@ -1,15 +1,12 @@
-name: Build CFFI 2.0 for Android (Chaquopy)
+name: Build CFFI 2.0 for Android (Fixed)
 
 on:
-  workflow_dispatch: # Позволяет запускать сборку кнопкой
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (Optional)
-        uses: actions/checkout@v4
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -18,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip
+          sudo apt-get install -y build-essential automake libtool wget unzip zip file
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -26,7 +23,7 @@ jobs:
           unzip -q android-ndk-r26b-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
 
-      - name: Build LibFFI (Static) & CFFI Wheel
+      - name: Build LibFFI & CFFI Wheel
         run: |
           # --- ПЕРЕМЕННЫЕ ---
           NDK=$ANDROID_NDK_HOME
@@ -45,7 +42,9 @@ jobs:
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
           
-          # Папки
+          # КРИТИЧНО: указываем линковщик
+          export LDSHARED="$CC -shared"
+          
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           mkdir -p $WORKDIR $FFI_INSTALL
@@ -60,26 +59,37 @@ jobs:
           make -j$(nproc)
           make install
           
-          # Настройка флагов для CFFI, чтобы он видел наш libffi
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
           export LDFLAGS="-L${FFI_INSTALL}/lib"
+          export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
           # 2. Сборка CFFI
           echo ">>> Building CFFI..."
           cd $WORKDIR
           pip install --upgrade pip setuptools wheel pycparser
-          
-          # Собираем wheel
           pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
           
-          # 3. Переименование
-          echo ">>> Renaming..."
+          # 3. ХАК: Перепаковка Wheel и чистка суффиксов
+          echo ">>> Fixing Wheel..."
           cd ./wheels
-          find . -name "cffi-*.whl" -exec mv {} cffi-${CFFI_VER}-${CHAQUO_TAG}.whl \;
-          ls -la
+          WHEEL_FILE=$(ls cffi-*.whl)
+          unzip -q $WHEEL_FILE -d wheel_tmp
+          rm $WHEEL_FILE
+          cd wheel_tmp
           
-          # Выносим результат в корень для загрузки
+          # Ищем .so файл, проверяем архитектуру и переименовываем
+          SO_FILE=$(find . -name "_cffi_backend*.so")
+          echo "Compiled file is:"
+          file $SO_FILE # В логах GitHub можно будет проверить, что это ARM aarch64
+          
+          # Переименовываем чисто в _cffi_backend.so
+          mv $SO_FILE _cffi_backend.so
+          
+          # Пакуем обратно с нужным тегом
+          zip -q -r ../cffi-${CFFI_VER}-${CHAQUO_TAG}.whl *
+          cd ..
+          
           mkdir -p $GITHUB_WORKSPACE/output
           cp *.whl $GITHUB_WORKSPACE/output/
 
