@@ -1,0 +1,90 @@
+name: Build CFFI 2.0 for Android (Chaquopy)
+
+on:
+  workflow_dispatch: # Позволяет запускать сборку кнопкой
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (Optional)
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential automake libtool wget unzip
+
+      - name: Download & Setup Android NDK (r26b)
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -q android-ndk-r26b-linux.zip
+          echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
+
+      - name: Build LibFFI (Static) & CFFI Wheel
+        run: |
+          # --- ПЕРЕМЕННЫЕ ---
+          NDK=$ANDROID_NDK_HOME
+          API=30
+          TARGET_HOST=aarch64-linux-android
+          LIBFFI_VER=3.4.6
+          CFFI_VER=2.0.0
+          CHAQUO_TAG=cp311-cp311-android_30_arm64_v8a
+          
+          # Настройка Toolchain
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export LD=$TOOLCHAIN/bin/ld
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          
+          # Папки
+          WORKDIR=$PWD/build_work
+          FFI_INSTALL=$WORKDIR/libffi_install
+          mkdir -p $WORKDIR $FFI_INSTALL
+          
+          # 1. Сборка LIBFFI
+          echo ">>> Building libffi..."
+          cd $WORKDIR
+          wget https://github.com/libffi/libffi/releases/download/v${LIBFFI_VER}/libffi-${LIBFFI_VER}.tar.gz
+          tar xzf libffi-${LIBFFI_VER}.tar.gz
+          cd libffi-${LIBFFI_VER}
+          ./configure --host=${TARGET_HOST} --prefix=${FFI_INSTALL} --disable-shared --enable-static
+          make -j$(nproc)
+          make install
+          
+          # Настройка флагов для CFFI, чтобы он видел наш libffi
+          export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
+          export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
+          export LDFLAGS="-L${FFI_INSTALL}/lib"
+          
+          # 2. Сборка CFFI
+          echo ">>> Building CFFI..."
+          cd $WORKDIR
+          pip install --upgrade pip setuptools wheel pycparser
+          
+          # Собираем wheel
+          pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
+          
+          # 3. Переименование
+          echo ">>> Renaming..."
+          cd ./wheels
+          find . -name "cffi-*.whl" -exec mv {} cffi-${CFFI_VER}-${CHAQUO_TAG}.whl \;
+          ls -la
+          
+          # Выносим результат в корень для загрузки
+          mkdir -p $GITHUB_WORKSPACE/output
+          cp *.whl $GITHUB_WORKSPACE/output/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cffi-android-wheel
+          path: output/*.whl
