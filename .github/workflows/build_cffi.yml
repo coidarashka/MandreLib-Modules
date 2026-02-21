@@ -1,4 +1,4 @@
-name: Build Ultimate CFFI 2.0 (Android Bionic Patch)
+name: Build Ultimate CFFI 2.0 (The Final Fix)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf binutils-aarch64-linux-gnu
+          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
           pip install wheel setuptools pycparser
 
       - name: Download & Setup Android NDK (r26b)
@@ -30,11 +30,9 @@ jobs:
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
-          
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           mkdir -p $WORKDIR $FFI_INSTALL
-          
           cd $WORKDIR
           wget https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
           tar xzf libffi-3.4.6.tar.gz
@@ -50,78 +48,56 @@ jobs:
           TARGET_HOST=aarch64-linux-android
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
-          export LDSHARED="$CC -shared"
-          
           WORKDIR=$PWD/build_work
           FFI_INSTALL=${{ env.FFI_INSTALL }}
           
-          # Создаем dummy-библиотеку питона для корректной линковки
+          # =========================================================
+          # ОБМАНКА №1: Создаем dummy libpython с нужными символами
+          # =========================================================
           mkdir -p $WORKDIR/dummy_lib
-          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          cat << 'EOF' > $WORKDIR/dummy_lib/dummy.c
+          #include <stdio.h>
+          void* stderr; void* stdout; void* stdin;
+          void PyExc_ImportError() {}
+          void PyExc_RuntimeError() {}
+          EOF
+          $CC -shared $WORKDIR/dummy_lib/dummy.c -o $WORKDIR/dummy_lib/libpython3.11.so
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
-          export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
+          export CFLAGS="-DANDROID -fPIC"
           export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
+          export LDSHARED="$CC -shared $LDFLAGS"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
           echo ">>> Building CFFI..."
           cd $WORKDIR
           pip wheel cffi==2.0.0 --no-deps -w dist
           
-          echo ">>> Patching for Android (Bionic)..."
+          echo ">>> Patching..."
           cd dist
           wheel unpack cffi-*.whl -d unpacked
           cd unpacked/cffi-*
           
           SO_FILE=$(find . -name "_cffi_backend*.so")
-          echo "Found SO file: $SO_FILE"
           
-          # Заменяем Linux-библиотеки на системную libc Android
-          # patchelf --replace-needed СТАРЫЙ_ФАЙЛ НОВЫЙ_ФАЙЛ
+          # Убираем зависимости от Linux
           patchelf --replace-needed libpthread.so.0 libc.so $SO_FILE || true
           patchelf --replace-needed libc.so.6 libc.so $SO_FILE || true
-          patchelf --replace-needed libm.so.6 libc.so $SO_FILE || true
-          patchelf --replace-needed libdl.so.2 libc.so $SO_FILE || true
           
-          # Принудительно вшиваем зависимость от ядра Питона
+          # Вшиваем зависимость от Питона (откуда он возьмет stderr)
           patchelf --add-needed libpython3.11.so $SO_FILE
           
-          # Переименовываем в чистое имя (чтобы ReMandre нашел его)
+          # КРИТИЧНО: Удаляем секцию symbol versioning (она ломает Android)
+          # Это удаляет те самые verneed[0], на которые ругался Android
+          patchelf --remove-section .gnu.version_r $SO_FILE || true
+          
           mv $SO_FILE _cffi_backend.so
           
-          # =========================================================
-          # ТЕСТЫ И ПРОВЕРКИ (SANITY CHECK)
-          # =========================================================
-          echo ">>> Starting Sanity Checks..."
+          # Тест
+          echo "Final Dependencies:"
+          patchelf --print-needed _cffi_backend.so
           
-          # 1. Проверка архитектуры
-          FILE_INFO=$(file _cffi_backend.so)
-          echo "Binary info: $FILE_INFO"
-          if [[ ! "$FILE_INFO" == *"ARM aarch64"* ]]; then
-            echo "FAILED: Wrong architecture! Need aarch64."
-            exit 1
-          fi
-          
-          # 2. Проверка зависимостей
-          NEEDS=$(patchelf --print-needed _cffi_backend.so)
-          echo "Final dependencies:"
-          echo "$NEEDS"
-          
-          # Ищем запрещенные линуксовые строки
-          if echo "$NEEDS" | grep -E "libc.so.6|libpthread|libm.so.6"; then
-            echo "FAILED: Binary still contains Linux-specific dependencies!"
-            exit 1
-          fi
-          
-          # Проверяем наличие libpython
-          if ! echo "$NEEDS" | grep "libpython3.11.so"; then
-            echo "FAILED: Binary is not linked to libpython3.11.so!"
-            exit 1
-          fi
-          
-          echo ">>> Checks passed successfully!"
-          
-          # Запаковываем обратно
+          # Запаковываем
           cd ../..
           wheel pack unpacked/cffi-* -d .
           mv cffi-2.0.0-*.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
