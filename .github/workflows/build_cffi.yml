@@ -15,7 +15,6 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          # patchelf - утилита для аппаратной модификации .so файлов!
           sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
           pip install wheel setuptools
 
@@ -66,7 +65,12 @@ jobs:
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
-          export LDFLAGS="-L${FFI_INSTALL}/lib"
+          
+          mkdir -p $WORKDIR/dummy_lib
+          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          
+          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
+          export LDSHARED="$CC -shared $LDFLAGS"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
           echo ">>> Building CFFI..."
@@ -78,20 +82,26 @@ jobs:
           wheel unpack cffi-*.whl -d unpacked
           cd unpacked/cffi-*
           
-          # Находим .so файл
           SO_FILE=$(find . -name "_cffi_backend*.so")
           echo "Found SO file: $SO_FILE"
           
-          # Переименовываем в чистое имя
           mv $SO_FILE _cffi_backend.so
           
-          # === САМОЕ ГЛАВНОЕ: ВШИВАЕМ ПИТОН В БИНАРНИК ===
+          # 1. Вшиваем Питон
           patchelf --add-needed libpython3.11.so _cffi_backend.so
+          
+          # 2. ВЫРЕЗАЕМ ЛИНУКСОВЫЙ МУСОР, КОТОРЫЙ ЛОМАЕТ ANDROID!
+          patchelf --remove-needed libpthread.so.0 _cffi_backend.so || true
+          patchelf --remove-needed libc.so.6 _cffi_backend.so || true
+          patchelf --remove-needed libdl.so.2 _cffi_backend.so || true
+          patchelf --remove-needed libm.so.6 _cffi_backend.so || true
+          patchelf --remove-needed libutil.so.1 _cffi_backend.so || true
+          patchelf --remove-needed librt.so.1 _cffi_backend.so || true
           
           cd ../..
           rm *.whl
           
-          # Запаковываем обратно (хэши пересчитаются автоматически!)
+          # Запаковываем обратно
           wheel pack unpacked/cffi-* -d .
           
           # Меняем имя колеса на Android формат
