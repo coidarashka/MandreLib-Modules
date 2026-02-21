@@ -1,4 +1,4 @@
-name: Build CFFI 2.0 for Android (Fixed)
+name: Build CFFI 2.0 for Android (Linked)
 
 on:
   workflow_dispatch:
@@ -25,7 +25,6 @@ jobs:
 
       - name: Build LibFFI & CFFI Wheel
         run: |
-          # --- ПЕРЕМЕННЫЕ ---
           NDK=$ANDROID_NDK_HOME
           API=30
           TARGET_HOST=aarch64-linux-android
@@ -33,7 +32,6 @@ jobs:
           CFFI_VER=2.0.0
           CHAQUO_TAG=cp311-cp311-android_30_arm64_v8a
           
-          # Настройка Toolchain
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
@@ -41,9 +39,6 @@ jobs:
           export LD=$TOOLCHAIN/bin/ld
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
-          
-          # КРИТИЧНО: указываем линковщик
-          export LDSHARED="$CC -shared"
           
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
@@ -59,18 +54,25 @@ jobs:
           make -j$(nproc)
           make install
           
+          # 2. МЕГА ХАК ДЛЯ ANDROID: Создаем пустую libpython3.11.so для линковки
+          # Это заставит _cffi_backend.so прописать зависимость и искать символы Питона при загрузке!
+          mkdir -p $WORKDIR/dummy_lib
+          $CC -shared -x c /dev/null -o $WORKDIR/dummy_lib/libpython3.11.so
+          
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-I${FFI_INSTALL}/include -fPIC"
-          export LDFLAGS="-L${FFI_INSTALL}/lib"
+          # -Wl,-allow-shlib-undefined игнорирует пустоту нашей dummy библиотеки
+          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
+          export LDSHARED="$CC -shared $LDFLAGS"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
-          # 2. Сборка CFFI
+          # 3. Сборка CFFI
           echo ">>> Building CFFI..."
           cd $WORKDIR
           pip install --upgrade pip setuptools wheel pycparser
           pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
           
-          # 3. ХАК: Перепаковка Wheel и чистка суффиксов
+          # 4. Чистка имени Wheel и .so файла
           echo ">>> Fixing Wheel..."
           cd ./wheels
           WHEEL_FILE=$(ls cffi-*.whl)
@@ -78,15 +80,9 @@ jobs:
           rm $WHEEL_FILE
           cd wheel_tmp
           
-          # Ищем .so файл, проверяем архитектуру и переименовываем
           SO_FILE=$(find . -name "_cffi_backend*.so")
-          echo "Compiled file is:"
-          file $SO_FILE # В логах GitHub можно будет проверить, что это ARM aarch64
-          
-          # Переименовываем чисто в _cffi_backend.so
           mv $SO_FILE _cffi_backend.so
           
-          # Пакуем обратно с нужным тегом
           zip -q -r ../cffi-${CFFI_VER}-${CHAQUO_TAG}.whl *
           cd ..
           
