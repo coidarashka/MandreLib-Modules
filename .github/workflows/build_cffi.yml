@@ -1,12 +1,15 @@
-name: Build Ultimate CFFI 2.0 (The Victory)
+name: Build CFFI 2.0 for Android (Chaquopy)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Позволяет запускать сборку кнопкой
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (Optional)
+        uses: actions/checkout@v4
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -15,8 +18,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip zip patchelf
-          pip install wheel setuptools pycparser
+          sudo apt-get install -y build-essential automake libtool wget unzip
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -24,89 +26,111 @@ jobs:
           unzip -q android-ndk-r26b-linux.zip
           echo "ANDROID_NDK_HOME=$PWD/android-ndk-r26b" >> $GITHUB_ENV
 
-      - name: Build LibFFI (Static)
+      - name: Build LibFFI (Static) & CFFI Wheel
         run: |
+          # --- ПЕРЕМЕННЫЕ ---
           NDK=$ANDROID_NDK_HOME
+          API=30
           TARGET_HOST=aarch64-linux-android
+          LIBFFI_VER=3.4.6
+          CFFI_VER=2.0.0
+          CHAQUO_TAG=cp311-cp311-android_30_arm64_v8a
+          
+          # Настройка Toolchain (Clang от Android NDK)
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
+          export CC=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang
+          export CXX=$TOOLCHAIN/bin/${TARGET_HOST}${API}-clang++
+          export AR=$TOOLCHAIN/bin/llvm-ar
+          export LD=$TOOLCHAIN/bin/ld
+          export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
+          export STRIP=$TOOLCHAIN/bin/llvm-strip
+          
+          # КРИТИЧЕСКИ ВАЖНЫЙ ФИКС ЛИНКОВЩИКА ДЛЯ PYTHON:
+          export LDSHARED="$CC -shared"
+          
+          # Папки
           WORKDIR=$PWD/build_work
           FFI_INSTALL=$WORKDIR/libffi_install
           mkdir -p $WORKDIR $FFI_INSTALL
+          
+          # 1. Сборка LIBFFI
+          echo ">>> Building libffi..."
           cd $WORKDIR
-          wget https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz
-          tar xzf libffi-3.4.6.tar.gz
-          cd libffi-3.4.6
+          wget https://github.com/libffi/libffi/releases/download/v${LIBFFI_VER}/libffi-${LIBFFI_VER}.tar.gz
+          tar xzf libffi-${LIBFFI_VER}.tar.gz
+          cd libffi-${LIBFFI_VER}
           ./configure --host=${TARGET_HOST} --prefix=${FFI_INSTALL} --disable-shared --enable-static
           make -j$(nproc)
           make install
-          echo "FFI_INSTALL=$FFI_INSTALL" >> $GITHUB_ENV
-
-      - name: Build and Patch CFFI Wheel
-        run: |
-          NDK=$ANDROID_NDK_HOME
-          TARGET_HOST=aarch64-linux-android
-          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-          export CC=$TOOLCHAIN/bin/${TARGET_HOST}30-clang
-          WORKDIR=$PWD/build_work
-          FFI_INSTALL=${{ env.FFI_INSTALL }}
           
-          cd $WORKDIR
-          wget https://files.pythonhosted.org/packages/source/c/cffi/cffi-2.0.0.tar.gz
-          tar xzf cffi-2.0.0.tar.gz
-          cd cffi-2.0.0
-
-          # =========================================================
-          # УМНЫЙ ПАТЧ: Находим файл и вшиваем заглушки потоков
-          # =========================================================
-          TARGET_C_FILE=$(find . -name "_cffi_backend.c")
-          echo "Found target file: $TARGET_C_FILE"
-          
-          # Вставляем определения в самое начало файла
-          echo 'void* stdin = 0; void* stdout = 0; void* stderr = 0;' | cat - "$TARGET_C_FILE" > temp && mv temp "$TARGET_C_FILE"
-          
-          # Создаем dummy-библиотеку для линковки (чтобы прописать зависимости)
-          mkdir -p ../dummy_lib
-          echo 'void PyExc_ImportError(void) {}' > ../dummy_lib/dummy.c
-          $CC -shared ../dummy_lib/dummy.c -o ../dummy_lib/libpython3.11.so
-          
+          # Настройка флагов для CFFI (Указываем таргет явно)
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
-          export CFLAGS="-DANDROID -fPIC"
-          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
-          export LDSHARED="$CC -shared $LDFLAGS"
-          export _PYTHON_HOST_PLATFORM="linux-aarch64"
+          export CFLAGS="-I${FFI_INSTALL}/include -fPIC -target ${TARGET_HOST}${API}"
+          export LDFLAGS="-L${FFI_INSTALL}/lib -target ${TARGET_HOST}${API}"
           
-          echo ">>> Running setup.py..."
-          python3 setup.py bdist_wheel
+          # 2. Сборка CFFI
+          echo ">>> Building CFFI..."
+          cd $WORKDIR
+          pip install --upgrade pip setuptools wheel pycparser
           
-          cd dist
-          WHEEL_FILE=$(ls cffi-*.whl)
-          unzip -q $WHEEL_FILE -d unpacked
-          cd unpacked
+          # Собираем wheel (без использования системных бинарников)
+          pip wheel cffi==${CFFI_VER} --no-binary cffi --no-deps -w ./wheels
           
-          SO_FILE=$(find . -name "_cffi_backend*.so")
+          # 3. Переименование под стандарты Chaquopy
+          echo ">>> Renaming..."
+          cd ./wheels
+          find . -name "cffi-*.whl" -exec mv {} cffi-${CFFI_VER}-${CHAQUO_TAG}.whl \;
+          ls -la
           
-          # Чистим зависимости от Linux Glibc
-          patchelf --replace-needed libpthread.so.0 libc.so $SO_FILE || true
-          patchelf --replace-needed libc.so.6 libc.so $SO_FILE || true
-          
-          # Прописываем зависимость от Питона
-          patchelf --add-needed libpython3.11.so $SO_FILE
-          
-          # Удаляем секцию версий (самый частый повод для dlopen failed)
-          patchelf --remove-section .gnu.version_r $SO_FILE || true
-          
-          mv $SO_FILE _cffi_backend.so
-          
-          echo "Final Check:"
-          patchelf --print-needed _cffi_backend.so
-          
-          zip -q -r ../../fixed_cffi.whl *
-          cd ../..
-          mv fixed_cffi.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
-          
+          # Выносим результат в корень
           mkdir -p $GITHUB_WORKSPACE/output
           cp *.whl $GITHUB_WORKSPACE/output/
+
+      - name: Verify Built Wheel (Sanity Check)
+        run: |
+          echo ">>> Starting sanity checks on the built binary..."
+          cd $GITHUB_WORKSPACE/output
+          
+          # Находим наш файл wheel
+          WHEEL_FILE=$(ls cffi-*.whl | head -n 1)
+          echo "Target wheel: $WHEEL_FILE"
+          
+          # Распаковываем во временную папку
+          unzip -q $WHEEL_FILE -d wheel_content
+          
+          # Ищем скомпилированный модуль
+          SO_FILE=$(find wheel_content -name "_cffi_backend.so" | head -n 1)
+          if [ -z "$SO_FILE" ]; then
+            echo "::error::_cffi_backend.so NOT FOUND in the wheel!"
+            exit 1
+          fi
+          echo "Found compiled object: $SO_FILE"
+          
+          READELF=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
+          
+          # ТЕСТ 1: Проверка архитектуры (должно быть AArch64)
+          ARCH=$($READELF -h $SO_FILE | grep "Machine:")
+          echo "Architecture: $ARCH"
+          if [[ "$ARCH" != *"AArch64"* ]]; then
+            echo "::error::Wrong architecture! Expected AArch64."
+            exit 1
+          fi
+          
+          # ТЕСТ 2: Проверка зависимостей (НЕ должно быть libc.so.6)
+          DEPS=$($READELF -d $SO_FILE | grep "NEEDED" || true)
+          echo -e "\nDynamic Dependencies:"
+          echo "$DEPS"
+          
+          if echo "$DEPS" | grep -q "libc.so.6"; then
+            echo "::error::FATAL! glibc (libc.so.6) dependency found. Cross-compilation failed to link against Android Bionic."
+            exit 1
+          fi
+          
+          if echo "$DEPS" | grep -q "libc.so"; then
+            echo "OK: Android Bionic libc.so found (this is correct)."
+          fi
+          
+          echo -e "\n>>> ALL CHECKS PASSED. The wheel is ready for Android! 🎉"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
