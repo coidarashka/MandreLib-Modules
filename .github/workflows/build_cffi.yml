@@ -1,4 +1,4 @@
-name: Build Ultimate CFFI 2.0 (The Final Victory)
+name: Build Ultimate CFFI 2.0 (The Victory)
 
 on:
   workflow_dispatch:
@@ -51,27 +51,32 @@ jobs:
           WORKDIR=$PWD/build_work
           FFI_INSTALL=${{ env.FFI_INSTALL }}
           
-          echo ">>> Downloading CFFI Sources..."
           cd $WORKDIR
           wget https://files.pythonhosted.org/packages/source/c/cffi/cffi-2.0.0.tar.gz
           tar xzf cffi-2.0.0.tar.gz
           cd cffi-2.0.0
 
           # =========================================================
-          # МЕГА-ХАК: ВШИВАЕМ СИМВОЛЫ ПРЯМО В ИСХОДНИКИ
-          # Это заставит библиотеку использовать свои внутренние 
-          # указатели вместо того, чтобы искать stderr в системе.
+          # УМНЫЙ ПАТЧ: Находим файл и вшиваем заглушки потоков
           # =========================================================
-          echo ">>> Injecting Android Fix..."
-          sed -i '1i void* stderr = 0; void* stdout = 0; void* stdin = 0;' c/_cffi_backend.c
+          TARGET_C_FILE=$(find . -name "_cffi_backend.c")
+          echo "Found target file: $TARGET_C_FILE"
+          
+          # Вставляем определения в самое начало файла
+          echo 'void* stdin = 0; void* stdout = 0; void* stderr = 0;' | cat - "$TARGET_C_FILE" > temp && mv temp "$TARGET_C_FILE"
+          
+          # Создаем dummy-библиотеку для линковки (чтобы прописать зависимости)
+          mkdir -p ../dummy_lib
+          echo 'void PyExc_ImportError(void) {}' > ../dummy_lib/dummy.c
+          $CC -shared ../dummy_lib/dummy.c -o ../dummy_lib/libpython3.11.so
           
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
           export CFLAGS="-DANDROID -fPIC"
-          export LDFLAGS="-L${FFI_INSTALL}/lib -Wl,-allow-shlib-undefined"
+          export LDFLAGS="-L${FFI_INSTALL}/lib -L$WORKDIR/dummy_lib -lpython3.11 -Wl,-allow-shlib-undefined"
           export LDSHARED="$CC -shared $LDFLAGS"
           export _PYTHON_HOST_PLATFORM="linux-aarch64"
           
-          echo ">>> Compiling Wheel..."
+          echo ">>> Running setup.py..."
           python3 setup.py bdist_wheel
           
           cd dist
@@ -81,21 +86,21 @@ jobs:
           
           SO_FILE=$(find . -name "_cffi_backend*.so")
           
-          # 1. Очищаем мусорные зависимости (теперь они не нужны, всё внутри)
-          patchelf --remove-needed libpthread.so.0 $SO_FILE || true
-          patchelf --remove-needed libc.so.6 $SO_FILE || true
+          # Чистим зависимости от Linux Glibc
+          patchelf --replace-needed libpthread.so.0 libc.so $SO_FILE || true
+          patchelf --replace-needed libc.so.6 libc.so $SO_FILE || true
           
-          # 2. УДАЛЯЕМ СЕКЦИЮ ВЕРСИЙ СИМВОЛОВ (ОБЯЗАТЕЛЬНО)
+          # Прописываем зависимость от Питона
+          patchelf --add-needed libpython3.11.so $SO_FILE
+          
+          # Удаляем секцию версий (самый частый повод для dlopen failed)
           patchelf --remove-section .gnu.version_r $SO_FILE || true
           
           mv $SO_FILE _cffi_backend.so
           
-          # Проверка
-          echo "Final SO Check:"
+          echo "Final Check:"
           patchelf --print-needed _cffi_backend.so
-          nm -D _cffi_backend.so | grep -E "stderr|stdout|stdin"
           
-          # 3. Запаковываем
           zip -q -r ../../fixed_cffi.whl *
           cd ../..
           mv fixed_cffi.whl cffi-2.0.0-cp311-cp311-android_30_arm64_v8a.whl
