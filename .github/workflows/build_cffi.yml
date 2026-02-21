@@ -18,7 +18,8 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential automake libtool wget unzip pkg-config
+          # ДОБАВЛЕН patchelf: магическая утилита для изменения зависимостей в .so
+          sudo apt-get install -y build-essential automake libtool wget unzip pkg-config patchelf
 
       - name: Download & Setup Android NDK (r26b)
         run: |
@@ -30,7 +31,7 @@ jobs:
         run: |
           # --- ПЕРЕМЕННЫЕ ---
           NDK=$ANDROID_NDK_HOME
-          API=30
+          API=24  # Снижаем до API 24 (Android 7) - это решит проблему со "stderr"
           TARGET_HOST=aarch64-linux-android
           LIBFFI_VER=3.4.6
           CFFI_VER=2.0.0
@@ -48,7 +49,7 @@ jobs:
           # КРИТИЧЕСКИ ВАЖНЫЙ ФИКС ЛИНКОВЩИКА ДЛЯ PYTHON:
           export LDSHARED="$CC -shared"
           
-          # Указываем Python, что мы кросс-компилируем:
+          # Указываем Python, что мы кросс-компилируем (избегаем суффиксов linux-gnu)
           export _PYTHON_HOST_PLATFORM=linux-aarch64
           
           # Папки
@@ -68,21 +69,19 @@ jobs:
           
           # Настройка флагов для CFFI (Указываем таргет явно)
           export PKG_CONFIG_PATH=${FFI_INSTALL}/lib/pkgconfig
-          export CFLAGS="-I${FFI_INSTALL}/include -fPIC -target ${TARGET_HOST}${API}"
+          export CFLAGS="-I${FFI_INSTALL}/include -fPIC -target ${TARGET_HOST}${API} -D__ANDROID_API__=${API}"
           export LDFLAGS="-L${FFI_INSTALL}/lib -target ${TARGET_HOST}${API}"
           
           # 2. Сборка CFFI
           echo ">>> Building CFFI..."
           cd $WORKDIR
-          # Ставим зависимости сборки ВРУЧНУЮ
           pip install --upgrade pip setuptools wheel pycparser
           
-          # Собираем wheel С ОТКЛЮЧЕННОЙ ИЗОЛЯЦИЕЙ (--no-build-isolation), 
-          # чтобы pip не сбросил наши переменные окружения!
+          # Собираем wheel С ОТКЛЮЧЕННОЙ ИЗОЛЯЦИЕЙ (--no-build-isolation)
           pip wheel cffi==${CFFI_VER} --no-build-isolation --no-binary cffi --no-deps -w ./wheels -v
           
-          # 3. Перепаковка и переименование
-          echo ">>> Repacking and Renaming..."
+          # 3. Перепаковка и ИНЪЕКЦИЯ ЗАВИСИМОСТЕЙ
+          echo ">>> Repacking and Injecting Dependencies..."
           cd ./wheels
           
           # Находим собранный wheel
@@ -91,11 +90,18 @@ jobs:
           # Распаковываем
           unzip -q $WHEEL_FILE -d tmp_wheel
           
-          # Ищем библиотеку (она будет иметь длинный суффикс)
+          # Ищем библиотеку 
           SO_FILE=$(find tmp_wheel -name "_cffi_backend*.so" | head -n 1)
           if [ -n "$SO_FILE" ]; then
-            echo "Renaming $SO_FILE to _cffi_backend.so for Chaquopy compatibility..."
-            mv $SO_FILE $(dirname $SO_FILE)/_cffi_backend.so
+            TARGET_SO="$(dirname $SO_FILE)/_cffi_backend.so"
+            echo "Renaming $SO_FILE to $TARGET_SO..."
+            mv "$SO_FILE" "$TARGET_SO"
+            
+            # --- МАГИЯ PATCHELF ---
+            # Вшиваем зависимость от Python, чтобы Android не жаловался на PyExc_ImportError!
+            echo "Injecting libpython3.11.so into DT_NEEDED..."
+            patchelf --add-needed libpython3.11.so "$TARGET_SO"
+            
           else
             echo "::error::Could not find ANY _cffi_backend.so inside the wheel!"
             exit 1
@@ -108,7 +114,7 @@ jobs:
           cd ..
           rm -rf tmp_wheel
           
-          # Переименовываем под Android стандарты
+          # Переименовываем под Android стандарты Chaquopy
           mv $WHEEL_FILE cffi-${CFFI_VER}-${CHAQUO_TAG}.whl
           ls -la
           
@@ -122,21 +128,17 @@ jobs:
           cd $GITHUB_WORKSPACE/output
           
           WHEEL_FILE=$(ls cffi-*.whl | head -n 1)
-          echo "Target wheel: $WHEEL_FILE"
-          
           unzip -q $WHEEL_FILE -d wheel_content
           
-          # Мы переименовали файл на предыдущем шаге, так что ищем точное короткое имя:
           SO_FILE=$(find wheel_content -name "_cffi_backend.so" | head -n 1)
           if [ -z "$SO_FILE" ]; then
             echo "::error::_cffi_backend.so NOT FOUND in the wheel!"
             exit 1
           fi
-          echo "Found compiled object: $SO_FILE"
           
           READELF=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
           
-          # ТЕСТ 1: Проверка архитектуры (должно быть AArch64)
+          # ТЕСТ 1: Проверка архитектуры
           ARCH=$($READELF -h $SO_FILE | grep "Machine:")
           echo "Architecture: $ARCH"
           if [[ "$ARCH" != *"AArch64"* ]]; then
@@ -144,21 +146,22 @@ jobs:
             exit 1
           fi
           
-          # ТЕСТ 2: Проверка зависимостей (НЕ должно быть libc.so.6)
+          # ТЕСТ 2: Проверка зависимостей (Должен быть Python)
           DEPS=$($READELF -d $SO_FILE | grep "NEEDED" || true)
           echo -e "\nDynamic Dependencies:"
           echo "$DEPS"
           
           if echo "$DEPS" | grep -q "libc.so.6"; then
-            echo "::error::FATAL! glibc (libc.so.6) dependency found. Cross-compilation failed to link against Android Bionic."
+            echo "::error::FATAL! glibc (libc.so.6) dependency found. Compilation failed."
             exit 1
           fi
           
-          if echo "$DEPS" | grep -q "libc.so"; then
-            echo "OK: Android Bionic libc.so found (this is correct)."
+          if ! echo "$DEPS" | grep -q "libpython3.11.so"; then
+            echo "::error::FATAL! libpython3.11.so is missing from DT_NEEDED. Injection failed."
+            exit 1
           fi
           
-          echo -e "\n>>> ALL CHECKS PASSED. The wheel is ready for Android! 🎉"
+          echo -e "\n>>> ALL CHECKS PASSED. The wheel is fully native, injected and ready for Android! 🎉"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
